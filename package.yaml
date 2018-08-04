@@ -1,0 +1,31 @@
+name:                throttled
+version:             1.0.0
+synopsis:            Concurrent processing of a Foldable, throttled by CPU count.
+description:         Concurrent processing of a Foldable, throttled by CPU count.
+homepage:            https://gitlab.com/fosskers/throttled
+license:             BSD3
+author:              Colin Woodbury
+maintainer:          colin@fosskers.ca
+copyright:           2018 Colin Woodbury
+category:            Concurrency
+
+extra-source-files:
+  - README.md
+
+ghc-options:
+  - -fwarn-unused-imports
+  - -fwarn-unused-binds
+  - -fwarn-name-shadowing
+  - -fwarn-unused-matches
+  - -fwarn-incomplete-patterns
+  - -fwarn-incomplete-uni-patterns
+  - -fwarn-redundant-constraints
+
+dependencies:
+  - base >= 4.7 && < 5
+  - async >= 2.2 && < 2.3
+  - stm
+
+library:
+  source-dirs: lib
+  other-modules: []
