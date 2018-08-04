@@ -2,6 +2,8 @@ name:                throttled
 version:             1.0.0
 synopsis:            Concurrent processing of a Foldable, throttled by CPU count.
 description:         Concurrent processing of a Foldable, throttled by CPU count.
+                     You must compile your executable with @-threaded@ to see
+                     any effect.
 homepage:            https://gitlab.com/fosskers/throttled
 license:             BSD3
 author:              Colin Woodbury
