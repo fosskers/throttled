@@ -1,3 +1,5 @@
+{-# LANGUAGE MultiWayIf, LambdaCase #-}
+
 -- |
 -- Module    : Control.Concurrent.Throttled
 -- Copyright : (c) Colin Woodbury, 2012 - 2018
@@ -7,7 +9,7 @@
 -- Handle concurrent fetches from a `Foldable`, throttled by the number
 -- of CPUs that the user has available.
 --
--- The canonical function is `throttled`. Notice the type of function
+-- The canonical function is `throttle`. Notice the type of function
 -- it expects as an argument:
 --
 -- @(TQueue a -> a -> IO b)@
@@ -27,8 +29,8 @@
 -- @
 
 module Control.Concurrent.Throttled
-  ( throttled
-  , throttled_
+  ( throttle, throttle_
+  , throttleMaybe, throttleMaybe_
   ) where
 
 import Control.Concurrent (getNumCapabilities, threadDelay)
@@ -44,6 +46,7 @@ import Data.Functor (($>))
 
 data Pool a b = Pool { threads :: !Word
                      , waiters :: !(TVar Word)
+                     , job     :: !(TVar JobStatus)
                      , source  :: !(TQueue a)
                      , target  :: !(TQueue b) }
 
@@ -51,40 +54,62 @@ newPool :: Foldable f => f a -> IO (Pool a b)
 newPool xs = Pool
   <$> (fromIntegral <$> getNumCapabilities)
   <*> newTVarIO 0
+  <*> newTVarIO Fantastic
   <*> atomically (newTQueue >>= \q -> traverse_ (writeTQueue q) xs $> q)
   <*> atomically newTQueue
 
-data Status = Waiting | Working
+data ThreadStatus = Waiting | Working
+
+data JobStatus = Failed | Fantastic
 
 -- | Concurrently traverse over some `Foldable` using 1 thread per
 -- CPU that the user has. The user's function is also passed the
 -- source `TQueue`, in case they wish to dynamically add work to it.
 --
--- The order of elements in the original `Foldable` is not maintained.
-throttled :: Foldable f => (TQueue a -> a -> IO b) -> f a -> IO (TQueue b)
-throttled = throttledGen (\q b -> atomically $ writeTQueue q b)
+-- The order of elements of the original `Foldable` is not maintained.
+throttle :: Foldable f => (TQueue a -> a -> IO b) -> f a -> IO (TQueue b)
+throttle f = throttleGen (\q b -> atomically $ writeTQueue q b) (\q a -> Just <$> f q a)
 
--- | Like `throttled`, but doesn't store any output.
-throttled_ :: Foldable f => (TQueue a -> a -> IO ()) -> f a -> IO ()
-throttled_ f xs = void $ throttledGen (\_ _ -> pure ()) f xs
+-- | Like `throttle`, but doesn't store any output.
+-- This is more efficient than @void . throttle@.
+throttle_ :: Foldable f => (TQueue a -> a -> IO b) -> f a -> IO ()
+throttle_ f = void . throttleGen (\_ _ -> mempty) (\q a -> Just <$> f q a)
+
+-- | Like `throttle`, but stop all threads safely if one finds a `Nothing`.
+-- The final `TQueue` contains as much completed work as the threads could
+-- manage before they died.
+throttleMaybe :: Foldable f => (TQueue a -> a -> IO (Maybe b)) -> f a -> IO (TQueue b)
+throttleMaybe = throttleGen (\q b -> atomically $ writeTQueue q b)
+
+-- | Like `throttleMaybe`, but doesn't store any output.
+-- This is more efficient than @void . throttleMaybe@.
+throttleMaybe_ :: Foldable f => (TQueue a -> a -> IO (Maybe b)) -> f a -> IO ()
+throttleMaybe_ f = void . throttleGen (\_ _ -> mempty) f
 
 -- | The generic case. The caller can choose what to do with the value produced by the work.
-throttledGen :: Foldable f => (TQueue b -> b -> IO ()) -> (TQueue a -> a -> IO b) -> f a -> IO (TQueue b)
-throttledGen g f xs = do
+throttleGen :: Foldable f => (TQueue b -> b -> IO ()) -> (TQueue a -> a -> IO (Maybe b)) -> f a -> IO (TQueue b)
+throttleGen g f xs = do
   p <- newPool xs
-  replicateConcurrently_ (fromIntegral $ threads p) (work p Working)
+  replicateConcurrently_ (fromIntegral $ threads p) (check p Working)
   pure $ target p
-  where work p s = do
-          mx <- atomically . tryReadTQueue $ source p
-          ws <- atomically . readTVar $ waiters p
-          case (mx, s) of
-            (Nothing, Waiting) | ws == threads p -> pure ()  -- All our threads have completed.
-                               | otherwise -> threadDelay 100000 *> work p Waiting
-            (Nothing, Working) -> do
-              atomically $ modifyTVar' (waiters p) succ
-              threadDelay 100000
-              work p Waiting
-            (Just x, Waiting) -> do
-              atomically $ modifyTVar' (waiters p) pred
-              f (source p) x >>= g (target p) >> work p Working
-            (Just x, Working) -> f (source p) x >>= g (target p) >> work p Working
+  where check p s = readTVarIO (job p) >>= \case
+          Failed    -> pure ()  -- Another thread failed.
+          Fantastic -> atomically (tryReadTQueue $ source p) >>= work p s
+
+        work p Waiting Nothing = do
+          ws <- readTVarIO $ waiters p
+          if | ws == threads p -> pure ()  -- All our threads have completed.
+             | otherwise       -> threadDelay 100000 *> check p Waiting
+
+        work p Working Nothing = do
+          atomically $ modifyTVar' (waiters p) succ
+          threadDelay 100000
+          check p Waiting
+
+        work p Waiting j@(Just _) = do
+          atomically $ modifyTVar' (waiters p) pred
+          work p Working j
+
+        work p Working (Just x) = f (source p) x >>= \case
+          Nothing  -> atomically $ writeTVar (job p) Failed
+          Just res -> g (target p) res >> check p Working
