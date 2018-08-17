@@ -39,6 +39,7 @@ import Control.Concurrent.STM (atomically)
 import Control.Concurrent.STM.TQueue
 import Control.Concurrent.STM.TVar
 import Control.Monad (void)
+import Data.Bifunctor (bimap)
 import Data.Foldable (traverse_)
 import Data.Functor (($>))
 
@@ -68,7 +69,7 @@ data JobStatus = Failed | Fantastic
 --
 -- The order of elements of the original `Foldable` is not maintained.
 throttle :: Foldable f => (TQueue a -> a -> IO b) -> f a -> IO (TQueue b)
-throttle f = throttleGen (\q b -> atomically $ writeTQueue q b) (\q a -> Just <$> f q a)
+throttle f xs = either id id <$> throttleGen (\q b -> atomically $ writeTQueue q b) (\q a -> Just <$> f q a) xs
 
 -- | Like `throttle`, but doesn't store any output.
 -- This is more efficient than @void . throttle@.
@@ -77,21 +78,22 @@ throttle_ f = void . throttleGen (\_ _ -> mempty) (\q a -> Just <$> f q a)
 
 -- | Like `throttle`, but stop all threads safely if one finds a `Nothing`.
 -- The final `TQueue` contains as much completed work as the threads could
--- manage before they died.
-throttleMaybe :: Foldable f => (TQueue a -> a -> IO (Maybe b)) -> f a -> IO (TQueue b)
+-- manage before they completed / died. Matching on the `Either` will tell
+-- you which scenario occurred.
+throttleMaybe :: Foldable f => (TQueue a -> a -> IO (Maybe b)) -> f a -> IO (Either (TQueue b) (TQueue b))
 throttleMaybe = throttleGen (\q b -> atomically $ writeTQueue q b)
 
 -- | Like `throttleMaybe`, but doesn't store any output.
--- This is more efficient than @void . throttleMaybe@.
-throttleMaybe_ :: Foldable f => (TQueue a -> a -> IO (Maybe b)) -> f a -> IO ()
-throttleMaybe_ f = void . throttleGen (\_ _ -> mempty) f
+-- Pattern matching on the `Either` will still let you know if a failure occurred.
+throttleMaybe_ :: Foldable f => (TQueue a -> a -> IO (Maybe b)) -> f a -> IO (Either () ())
+throttleMaybe_ f xs = bimap (const ()) (const ()) <$> throttleGen (\_ _ -> mempty) f xs
 
 -- | The generic case. The caller can choose what to do with the value produced by the work.
-throttleGen :: Foldable f => (TQueue b -> b -> IO ()) -> (TQueue a -> a -> IO (Maybe b)) -> f a -> IO (TQueue b)
+throttleGen :: Foldable f => (TQueue b -> b -> IO ()) -> (TQueue a -> a -> IO (Maybe b)) -> f a -> IO (Either (TQueue b) (TQueue b))
 throttleGen g f xs = do
   p <- newPool xs
   replicateConcurrently_ (fromIntegral $ threads p) (check p Working)
-  pure $ target p
+  ($ target p) . jobStatus <$> readTVarIO (job p)
   where check p s = readTVarIO (job p) >>= \case
           Failed    -> pure ()  -- Another thread failed.
           Fantastic -> atomically (tryReadTQueue $ source p) >>= work p s
@@ -113,3 +115,7 @@ throttleGen g f xs = do
         work p Working (Just x) = f (source p) x >>= \case
           Nothing  -> atomically $ writeTVar (job p) Failed
           Just res -> g (target p) res >> check p Working
+
+jobStatus :: JobStatus -> (a -> Either a a)
+jobStatus Failed    = Left
+jobStatus Fantastic = Right
