@@ -9,7 +9,7 @@ description:
   Concurrent processing of a Foldable, throttled by CPU count. You must compile your executable with @-threaded@ to see any effect.
 
 category:           Concurrency
-homepage:           https://gitlab.com/fosskers/throttled
+homepage:           https://github.com/fosskers/throttled
 author:             Colin Woodbury
 maintainer:         colin@fosskers.ca
 copyright:          2018 Colin Woodbury
